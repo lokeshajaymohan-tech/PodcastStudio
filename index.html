@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PodcastStudio · Publish & Listener Analytics</title>
+  <meta name="description" content="PodcastStudio: prepare, quality-check, publish and measure podcast episodes in one dashboard.">
+  <meta name="theme-color" content="#6D28D9">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%236D28D9'/%3E%3Cpath d='M9 18v-4M13 21V11M17 24V8M21 20v-8M25 17v-2' stroke='white' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+  <link href="css/styles.css" rel="stylesheet">
+</head>
+<body>
+  <a class="visually-hidden-focusable skip-link" href="#view">Skip to main content</a>
+
+  <!-- Loading state -->
+  <div id="loading" class="loading-screen" role="status" aria-live="polite">
+    <div class="eq" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></div>
+    <p class="mt-3 mb-0 fw-semibold">Loading PodcastStudio…</p>
+  </div>
+
+  <div class="app">
+    <!-- Sidebar navigation (offcanvas on phone/tablet) -->
+    <aside class="offcanvas-lg offcanvas-start sidebar" id="sidebar" tabindex="-1" aria-labelledby="sidebarLabel">
+      <div class="offcanvas-header border-bottom">
+        <span class="brand" id="sidebarLabel"><span class="brand-mark" aria-hidden="true"><i class="bi bi-soundwave"></i></span>PodcastStudio</span>
+        <button type="button" class="btn-close" data-bs-dismiss="offcanvas" data-bs-target="#sidebar" aria-label="Close menu"></button>
+      </div>
+      <div class="offcanvas-body">
+        <a href="#/home" class="brand d-none d-lg-flex mb-4"><span class="brand-mark" aria-hidden="true"><i class="bi bi-soundwave"></i></span>PodcastStudio</a>
+
+        <fieldset class="role-switch mb-4">
+          <legend class="nav-caption">View as</legend>
+          <div class="role-seg" role="radiogroup">
+            <input type="radio" class="btn-check" name="role" id="role-podcaster" value="podcaster" autocomplete="off">
+            <label class="role-opt" for="role-podcaster"><i class="bi bi-mic-fill" aria-hidden="true"></i> Podcaster</label>
+            <input type="radio" class="btn-check" name="role" id="role-engineer" value="engineer" autocomplete="off">
+            <label class="role-opt" for="role-engineer"><i class="bi bi-sliders" aria-hidden="true"></i> Audio Engineer</label>
+          </div>
+        </fieldset>
+
+        <nav aria-label="Main">
+          <p class="nav-caption">Workspace</p>
+          <ul class="nav-list">
+            <li><a href="#/home" data-nav="home"><i class="bi bi-house" aria-hidden="true"></i><span>Home</span></a></li>
+            <li><a href="#/dashboard" data-nav="dashboard"><i class="bi bi-collection-play" aria-hidden="true"></i><span>Publishing</span></a></li>
+            <li><a href="#/review" data-nav="review"><i class="bi bi-clipboard2-check" aria-hidden="true"></i><span>Review Queue</span><span class="nav-count" id="navReviewCount"></span><i class="bi bi-lock-fill nav-lock" aria-hidden="true"></i></a></li>
+            <li><a href="#/analytics" data-nav="analytics"><i class="bi bi-graph-up-arrow" aria-hidden="true"></i><span>Analytics</span></a></li>
+          </ul>
+          <p class="nav-caption mt-4">Help</p>
+          <ul class="nav-list">
+            <li><a href="#/about" data-nav="about"><i class="bi bi-info-circle" aria-hidden="true"></i><span>About &amp; Help</span></a></li>
+            <li><button type="button" data-action="shortcuts"><i class="bi bi-keyboard" aria-hidden="true"></i><span>Keyboard shortcuts</span><kbd class="ms-auto">?</kbd></button></li>
+          </ul>
+        </nav>
+
+        <div class="sidebar-foot mt-auto">
+          <div class="sample-note"><i class="bi bi-database" aria-hidden="true"></i><span><strong>Demo workspace.</strong> Shows, episodes and listener numbers are sample data.</span></div>
+        </div>
+      </div>
+    </aside>
+
+    <div class="main">
+      <header class="topbar">
+        <button class="btn btn-icon d-lg-none" type="button" data-bs-toggle="offcanvas" data-bs-target="#sidebar" aria-controls="sidebar" aria-label="Open menu">
+          <i class="bi bi-list" aria-hidden="true"></i>
+        </button>
+        <div class="topbar-title" id="pageTitle">Home</div>
+        <div class="ms-auto d-flex align-items-center gap-2">
+          <span class="role-pill" id="rolePill" aria-live="polite"></span>
+          <button type="button" class="btn btn-outline-primary btn-sm d-none d-sm-inline-flex align-items-center gap-1" data-action="start-tour">
+            <i class="bi bi-stopwatch" aria-hidden="true"></i> 30-second tour
+          </button>
+          <a href="#/episode/new" class="btn btn-primary btn-sm d-inline-flex align-items-center gap-1 podcaster-only" id="topNew">
+            <i class="bi bi-plus-lg" aria-hidden="true"></i><span class="d-none d-sm-inline">New episode</span><span class="visually-hidden d-sm-none">New episode</span>
+          </a>
+        </div>
+      </header>
+
+      <div id="globalBanner"></div>
+      <main id="view" tabindex="-1" class="view"></main>
+
+      <footer class="app-footer">
+        <span>PodcastStudio v0.1 · OJT demo</span>
+        <span>Sample data only · Role checks run in your browser and are not real security</span>
+      </footer>
+    </div>
+  </div>
+
+  <!-- 30-second tour progress -->
+  <section id="tourPill" class="tour-pill d-none" aria-label="30-second tour progress">
+    <div class="d-flex align-items-center gap-2">
+      <i class="bi bi-stopwatch" aria-hidden="true"></i>
+      <span class="tour-time" id="tourTime">0.0s</span>
+      <span class="tour-goal">goal 30s</span>
+      <button type="button" class="btn-close btn-close-white ms-auto" id="tourClose" aria-label="End tour"></button>
+    </div>
+    <ol class="tour-steps" id="tourSteps"></ol>
+    <div class="tour-next" id="tourNext" aria-live="polite"></div>
+  </section>
+
+  <!-- Toasts (FeedbackMessage) -->
+  <div class="toast-container position-fixed bottom-0 end-0 p-3" id="toasts"></div>
+
+  <!-- Confirm dialog -->
+  <div class="modal fade" id="confirmModal" tabindex="-1" aria-labelledby="confirmTitle" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2 class="modal-title h5" id="confirmTitle">Are you sure?</h2>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body" id="confirmBody"></div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-primary" id="confirmOk">Confirm</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Shortcuts dialog -->
+  <div class="modal fade" id="shortcutsModal" tabindex="-1" aria-labelledby="shortcutsTitle" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2 class="modal-title h5" id="shortcutsTitle"><i class="bi bi-keyboard me-2" aria-hidden="true"></i>Keyboard shortcuts</h2>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <dl class="shortcut-list">
+            <div><dt><kbd>N</kbd></dt><dd>New episode (Podcaster)</dd></div>
+            <div><dt><kbd>/</kbd></dt><dd>Search episodes</dd></div>
+            <div><dt><kbd>R</kbd></dt><dd>Switch role</dd></div>
+            <div><dt><kbd>G</kbd> then <kbd>H</kbd></dt><dd>Go to Home</dd></div>
+            <div><dt><kbd>G</kbd> then <kbd>P</kbd></dt><dd>Go to Publishing</dd></div>
+            <div><dt><kbd>G</kbd> then <kbd>Q</kbd></dt><dd>Go to Review Queue</dd></div>
+            <div><dt><kbd>G</kbd> then <kbd>A</kbd></dt><dd>Go to Analytics</dd></div>
+            <div><dt><kbd>T</kbd></dt><dd>Start the 30-second tour</dd></div>
+            <div><dt><kbd>?</kbd></dt><dd>Show this list</dd></div>
+          </dl>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="confetti" class="confetti" aria-hidden="true"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="js/rules.js"></script>
+  <script src="js/store.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

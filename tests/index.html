@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PodcastStudio · Rule tests</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="../css/styles.css" rel="stylesheet">
+</head>
+<body>
+  <main class="view">
+    <a class="crumb" href="../index.html#/about">← Back to PodcastStudio</a>
+    <div class="page-head"><div><h1 class="page-title">Rule tests</h1><p class="page-sub">Quality, publish and analytics rules checked against hand-calculated results.</p></div><div id="summary" aria-live="polite"></div></div>
+    <div class="ps-card"><div class="table-responsive"><table class="table ps-table mb-0">
+      <thead><tr><th scope="col">Result</th><th scope="col">Group</th><th scope="col">Test</th><th scope="col">Detail</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table></div></div>
+  </main>
+  <script src="../js/rules.js"></script>
+  <script src="tests.js"></script>
+  <script>
+    (function () {
+      var t = window.PSTestResults;
+      var esc = function (s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); };
+      document.getElementById('summary').innerHTML = '<span class="ps-badge ' + (t.failed ? 'b-error' : 'b-published') + '" style="font-size:.95rem">' + t.passed + ' passed · ' + t.failed + ' failed</span>';
+      document.getElementById('rows').innerHTML = t.results.map(function (r) {
+        return '<tr><td><span class="ps-badge ' + (r.pass ? 'b-published' : 'b-error') + '">' + (r.pass ? 'Pass' : 'Fail') + '</span></td><td>' + esc(r.group) + '</td><td>' + esc(r.name) + '</td><td class="small">' + esc(r.detail) + '</td></tr>';
+      }).join('');
+    })();
+  </script>
+</body>
+</html>
