@@ -129,4 +129,10 @@ Palette: primary `#6D28D9`, text `#1F2937`, error `#B42318`, warning `#92400E`, 
 
 ## Team
 
-Koppuravuri Lokesh Ajay Mohan, Perumala Jayasurya. Mentor: Madhushri Tangali.
+| Name | GitHub | Role |
+|---|---|---|
+| Koppuravuri Lokesh Ajay Mohan | [@lokeshajaymohan-tech](https://github.com/lokeshajaymohan-tech) | Student 1 |
+| Perumala Jayasurya | [@suryakrishnan627-tech](https://github.com/suryakrishnan627-tech) | Student 2 |
+| Madhushri Tangali | — | Mentor / Reviewer |
+
+Live demo: https://lokeshajaymohan-tech.github.io/PodcastStudio/
