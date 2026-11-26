@@ -88,6 +88,39 @@
   /* ---------- CSV ---------- */
   test('CSV', 'quotes commas and quotes', () => eq(R.toCSV([{ a: 'x, "y"' }], [{ label: 'A', value: r => r.a }]), 'A\r\n"x, ""y"""'));
 
+  /* ---------- mp4 + upload ---------- */
+  test('Upload', '.mp4 passes the format check', () => eq(qc(-16, 192, 'episode.mp4').checks[2].pass, true));
+  test('Upload', 'mp3 upload is accepted with no warning', () => { const v = R.validateUpload({ name: 'ep.mp3', size: 5e6, type: 'audio/mpeg' }); return eq(v.ok && !v.warning, true); });
+  test('Upload', 'mp4 video upload is accepted', () => eq(R.validateUpload({ name: 'ep.mp4', size: 5e6, type: 'video/mp4' }).ok, true));
+  test('Upload', 'wav upload is accepted but warns about the format check', () => { const v = R.validateUpload({ name: 'ep.wav', size: 5e6, type: 'audio/wav' }); return eq(v.ok && /fail the format check/.test(v.warning), true); });
+  test('Upload', 'a PDF is rejected', () => eq(R.validateUpload({ name: 'notes.pdf', size: 1000, type: 'application/pdf' }).ok, false));
+  test('Upload', 'an empty file is rejected', () => eq(/empty/.test(R.validateUpload({ name: 'ep.mp3', size: 0, type: 'audio/mpeg' }).error), true));
+  test('Upload', 'a file over 300 MB is rejected', () => eq(R.validateUpload({ name: 'ep.mp3', size: 301 * 1024 * 1024, type: 'audio/mpeg' }).ok, false));
+  test('Upload', 'bitrate estimate: 24,000,000 bytes over 1000 s = 192 kbps', () => eq(R.estimateBitrateKbps(24e6, 1000), 192));
+  test('Upload', 'bitrate estimate with no duration = null', () => eq(R.estimateBitrateKbps(24e6, 0), null));
+
+  /* ---------- Loudness (BS.1770): a 0 dBFS 997 Hz sine on one channel reads −3.01 LUFS ---------- */
+  const sine = (fs, sec, amp) => { const x = new Float32Array(fs * sec); for (let i = 0; i < x.length; i++) x[i] = amp * Math.sin(2 * Math.PI * 997 * i / fs); return x; };
+  test('Loudness', '0 dBFS 997 Hz sine @48 kHz = −3.01 LUFS', () => approx(R.measureLoudness([sine(48000, 3, 1)], 48000).lufs, -3.01, 0.05));
+  test('Loudness', '−20 dBFS sine @48 kHz = −23.01 LUFS', () => approx(R.measureLoudness([sine(48000, 3, 0.1)], 48000).lufs, -23.01, 0.05));
+  test('Loudness', 'same sine @24 kHz (coefficients adapt) = −3.01 LUFS', () => approx(R.measureLoudness([sine(24000, 3, 1)], 24000).lufs, -3.01, 0.1));
+  test('Loudness', 'stereo (same signal both sides) is +3 dB = 0.00 LUFS', () => { const x = sine(48000, 3, 1); return approx(R.measureLoudness([x, x], 48000).lufs, 0, 0.05); });
+  test('Loudness', 'sample peak of a full-scale sine ≈ 0 dBFS', () => approx(R.measureLoudness([sine(48000, 1, 1)], 48000).peakDb, 0, 0.01));
+  test('Loudness', 'silence = −Infinity', () => eq(R.measureLoudness([new Float32Array(48000)], 48000).lufs, -Infinity));
+  test('Loudness', 'clip shorter than 0.4 s = null', () => eq(R.measureLoudness([sine(48000, 0.3, 1)], 48000).lufs, null));
+
+  /* ---------- Sign-in ---------- */
+  test('Sign-in', 'SHA-256("abc") matches the standard test vector', () => eq(R.sha256Hex('abc'), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'));
+  test('Sign-in', 'SHA-256("") matches the standard test vector', () => eq(R.sha256Hex(''), 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'));
+  test('Sign-in', 'SHA-256 of a 56-byte message (two blocks)', () => eq(R.sha256Hex('abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq'), '248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1'));
+  const su = { name: 'Ana', email: 'ana@studio.com', role: 'podcaster', password: 'Studio2026', confirm: 'Studio2026' };
+  test('Sign-in', 'valid sign-up passes', () => eq(R.validateSignup(su, []).valid, true));
+  test('Sign-in', 'duplicate email is rejected', () => eq(!!R.validateSignup(su, ['ana@studio.com']).errors.email, true));
+  test('Sign-in', 'password without a number is rejected', () => eq(!!R.validateSignup(Object.assign({}, su, { password: 'Studiostudio', confirm: 'Studiostudio' }), []).errors.password, true));
+  test('Sign-in', 'mismatched confirmation is rejected', () => eq(R.validateSignup(Object.assign({}, su, { confirm: 'Studio2027' }), []).errors.confirm, 'The passwords do not match.'));
+  test('Sign-in', 'login needs a valid email', () => eq(!!R.validateLogin({ email: 'ana@', password: 'x' }).errors.email, true));
+  test('Sign-in', 'password strength: "Studio-2026-Mix" is Strong', () => eq(R.passwordStrength('Studio-2026-Mix').label, 'Strong'));
+
   /* ---------- Dates ---------- */
   test('Dates', 'addDays crosses month end', () => eq(R.addDays('2026-11-30', 1), '2026-12-01'));
   test('Dates', 'daysBetween', () => eq(R.daysBetween('2026-11-01', '2026-11-15'), 14));

@@ -11,14 +11,17 @@
     shows: 'podcaststudio_shows',
     episodes: 'podcaststudio_episodes',
     stats: 'podcaststudio_stats',
-    prefs: 'podcaststudio_prefs'
+    prefs: 'podcaststudio_prefs',
+    users: 'podcaststudio_users',
+    session: 'podcaststudio_session'
   });
 
   const DEFAULT_PREFS = Object.freeze({
     role: 'podcaster',
     dateRange: { preset: '30', from: null, to: null },
     lastScreen: '#/home',
-    sortOrder: { key: 'releaseDate', dir: 'desc' }
+    sortOrder: { key: 'releaseDate', dir: 'desc' },
+    theme: 'system'
   });
 
   function isAvailable() {
@@ -63,6 +66,7 @@
     if (merged.role !== 'podcaster' && merged.role !== 'engineer') merged.role = 'podcaster';
     if (!merged.dateRange || typeof merged.dateRange !== 'object') merged.dateRange = Object.assign({}, DEFAULT_PREFS.dateRange);
     if (!merged.sortOrder || typeof merged.sortOrder !== 'object') merged.sortOrder = Object.assign({}, DEFAULT_PREFS.sortOrder);
+    if (['light', 'dark', 'system'].indexOf(merged.theme) === -1) merged.theme = 'system';
     return merged;
   }
 
@@ -221,7 +225,70 @@
     return { ok, data };
   }
 
+  /* ---------- Accounts (client-side demo sign-in) ---------- */
+
+  const DEMO_PASSWORD = 'Studio2026';
+  const DEMO_USERS = [
+    { userId: 'u-demo-pod', name: 'Ari Mendes', email: 'podcaster@demo.studio', role: 'podcaster' },
+    { userId: 'u-demo-eng', name: 'Sam Rivera', email: 'engineer@demo.studio', role: 'engineer' }
+  ];
+
+  function randomHex(bytes) {
+    const a = new Uint8Array(bytes);
+    if (root.crypto && root.crypto.getRandomValues) root.crypto.getRandomValues(a);
+    else for (let i = 0; i < bytes; i++) a[i] = Math.floor(Math.random() * 256);
+    return Array.from(a, b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  /** Builds a stored user with a salted SHA-256 password hash (never the password itself). */
+  function makeUser(u, password) {
+    const salt = randomHex(16);
+    return {
+      userId: u.userId || 'u-' + Date.now().toString(36) + randomHex(3),
+      name: u.name,
+      email: String(u.email).trim().toLowerCase(),
+      role: u.role,
+      salt,
+      passwordHash: R.sha256Hex(salt + ':' + password),
+      createdAt: new Date().toISOString()
+    };
+  }
+
+  function checkPassword(user, password) {
+    return !!user && R.sha256Hex(user.salt + ':' + password) === user.passwordHash;
+  }
+
+  /** Returns the user list, adding the demo accounts the first time. */
+  function loadUsers() {
+    let users = read('users');
+    if (!Array.isArray(users)) {
+      users = DEMO_USERS.map(u => makeUser(u, DEMO_PASSWORD));
+      save('users', users);
+    }
+    return users;
+  }
+
+  /** Session lives in localStorage ("remember me") or sessionStorage. */
+  function readSession() {
+    try {
+      const raw = localStorage.getItem(KEYS.session) || sessionStorage.getItem(KEYS.session);
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) { return null; }
+  }
+  function writeSession(userId, remember) {
+    try {
+      clearSession();
+      const v = JSON.stringify({ userId, at: new Date().toISOString() });
+      (remember ? localStorage : sessionStorage).setItem(KEYS.session, v);
+      return true;
+    } catch (e) { return false; }
+  }
+  function clearSession() {
+    try { localStorage.removeItem(KEYS.session); sessionStorage.removeItem(KEYS.session); } catch (e) { /* ignore */ }
+  }
+
   root.PSStore = {
-    KEYS, DEFAULT_PREFS, isAvailable, read, save, remove, loadPrefs, seed, buildSampleData, sampleShows
+    KEYS, DEFAULT_PREFS, isAvailable, read, save, remove, loadPrefs, seed, buildSampleData, sampleShows,
+    DEMO_USERS, DEMO_PASSWORD, makeUser, checkPassword, loadUsers, readSession, writeSession, clearSession
   };
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -13,7 +13,7 @@
     targetLufs: -16,
     toleranceLufs: 1,
     minBitrateKbps: 128,
-    allowedFormats: Object.freeze(['mp3', 'm4a'])
+    allowedFormats: Object.freeze(['mp3', 'm4a', 'mp4'])
   });
 
   const DAY_MS = 86400000;
@@ -90,7 +90,7 @@
     else if (description.length > 1000) errors.description = 'Keep the description to 1,000 characters or fewer.';
 
     if (!file) errors.audioFileName = 'Add the audio file name, for example episode-12.mp3.';
-    else if (!getFormat(file)) errors.audioFileName = 'Include the file extension, for example .mp3 or .m4a.';
+    else if (!getFormat(file)) errors.audioFileName = 'Include the file extension, for example .mp3, .m4a or .mp4.';
     else if (/[\\/:*?"<>|]/.test(file)) errors.audioFileName = 'Remove these characters from the file name: \\ / : * ? " < > |';
 
     const dur = Number(f.durationSec);
@@ -149,11 +149,11 @@
     const fmtPass = r.allowedFormats.indexOf(fmt) !== -1;
     const format = {
       id: 'format',
-      label: 'Format is mp3 or m4a',
+      label: 'Format is mp3, m4a or mp4',
       value: fmt ? '.' + fmt : 'Unknown',
       entered: !!fmt,
       pass: fmtPass,
-      detail: !fmt ? 'No file extension found in the file name.' : fmtPass ? 'Accepted format.' : '.' + fmt + ' is not accepted. Export as mp3 or m4a.'
+      detail: !fmt ? 'No file extension found in the file name.' : fmtPass ? 'Accepted format.' : '.' + fmt + ' is not accepted. Export as mp3, m4a or mp4.'
     };
 
     const checks = [loudness, bitrate, format];
@@ -324,7 +324,210 @@
     return [head].concat(body).join('\r\n');
   }
 
+  /* ---------- File upload (mp3 / m4a / mp4 and other audio) ---------- */
+
+  const UPLOAD_RULES = Object.freeze({
+    maxBytes: 300 * 1024 * 1024,
+    mediaExtensions: Object.freeze(['mp3', 'm4a', 'mp4', 'aac', 'wav', 'ogg', 'oga', 'opus', 'flac', 'webm', 'mov', 'm4v'])
+  });
+
+  function formatBytes(bytes) {
+    const b = Number(bytes) || 0;
+    if (b < 1024) return b + ' B';
+    if (b < 1024 * 1024) return (b / 1024).toFixed(1) + ' KB';
+    if (b < 1024 * 1024 * 1024) return (b / 1024 / 1024).toFixed(1) + ' MB';
+    return (b / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+  }
+
+  /**
+   * Checks a chosen file before it is read.
+   * @param {{name:string, size:number, type:string}} f
+   * @returns {{ok:boolean, error?:string, warning?:string, format:string}}
+   */
+  function validateUpload(f) {
+    const name = String(f && f.name || '');
+    const type = String(f && f.type || '').toLowerCase();
+    const size = Number(f && f.size) || 0;
+    const format = getFormat(name);
+    const isMedia = /^(audio|video)\//.test(type) || UPLOAD_RULES.mediaExtensions.indexOf(format) !== -1;
+    if (!name) return { ok: false, format, error: 'Choose a file to upload.' };
+    if (!isMedia) return { ok: false, format, error: '"' + name + '" is not an audio or video file. Choose an mp3, m4a or mp4 file.' };
+    if (size === 0) return { ok: false, format, error: 'This file is empty (0 bytes). Export the episode again and choose the new file.' };
+    if (size > UPLOAD_RULES.maxBytes) {
+      return { ok: false, format, error: 'This file is ' + formatBytes(size) + '. The limit is ' + formatBytes(UPLOAD_RULES.maxBytes) + ' in this demo. Export a smaller file and try again.' };
+    }
+    const allowed = QUALITY_RULES.allowedFormats.indexOf(format) !== -1;
+    return {
+      ok: true,
+      format,
+      warning: allowed ? '' : (format ? '.' + format : 'A file without an extension') + ' will fail the format check. Export as mp3, m4a or mp4 before sending it for review.'
+    };
+  }
+
+  /** Average bitrate in kbps from file size and duration. */
+  function estimateBitrateKbps(bytes, durationSec) {
+    const b = Number(bytes), d = Number(durationSec);
+    if (!(b > 0) || !(d > 0) || !isFinite(d)) return null;
+    return Math.round(b * 8 / d / 1000);
+  }
+
+  /* ---------- Loudness (ITU-R BS.1770 integrated loudness, LUFS) ---------- */
+
+  /** K-weighting filter coefficients for any sample rate (two biquads). */
+  function kWeightingCoeffs(fs) {
+    let f0 = 1681.974450955533, G = 3.999843853973347, Q = 0.7071752369554196;
+    let K = Math.tan(Math.PI * f0 / fs);
+    const Vh = Math.pow(10, G / 20), Vb = Math.pow(Vh, 0.4996667741545416);
+    let a0 = 1 + K / Q + K * K;
+    const pre = {
+      b: [(Vh + Vb * K / Q + K * K) / a0, 2 * (K * K - Vh) / a0, (Vh - Vb * K / Q + K * K) / a0],
+      a: [2 * (K * K - 1) / a0, (1 - K / Q + K * K) / a0]
+    };
+    f0 = 38.13547087602444; Q = 0.5003270373238773;
+    K = Math.tan(Math.PI * f0 / fs);
+    a0 = 1 + K / Q + K * K;
+    const rlb = { b: [1, -2, 1], a: [2 * (K * K - 1) / a0, (1 - K / Q + K * K) / a0] };
+    return { pre, rlb };
+  }
+
+  /**
+   * Integrated loudness of PCM channels (Float32Array, -1..1) with absolute (-70 LUFS)
+   * and relative (-10 LU) gating, 400 ms blocks with 75% overlap. Also returns the
+   * sample peak in dBFS and `buckets` peak values for a waveform.
+   * @returns {{lufs:number|null, peakDb:number, peaks:number[]}}  lufs is null for clips under 0.4 s, -Infinity for silence.
+   */
+  function measureLoudness(channels, fs, buckets) {
+    const n = channels.length ? channels[0].length : 0;
+    const seg = Math.round(0.1 * fs);
+    const nSeg = Math.floor(n / seg);
+    const energy = new Float64Array(Math.max(nSeg, 1));
+    const nb = buckets || 160;
+    const peaks = new Array(nb).fill(0);
+    const per = Math.max(1, Math.ceil(n / nb));
+    const { pre, rlb } = kWeightingCoeffs(fs);
+    let peak = 0;
+    channels.forEach((x, ci) => {
+      let px1 = 0, px2 = 0, py1 = 0, py2 = 0, rx1 = 0, rx2 = 0, ry1 = 0, ry2 = 0;
+      for (let i = 0; i < n; i++) {
+        const xi = x[i];
+        const ax = xi < 0 ? -xi : xi;
+        if (ax > peak) peak = ax;
+        if (ci === 0) { const bi = (i / per) | 0; if (ax > peaks[bi]) peaks[bi] = ax; }
+        const y = pre.b[0] * xi + pre.b[1] * px1 + pre.b[2] * px2 - pre.a[0] * py1 - pre.a[1] * py2;
+        px2 = px1; px1 = xi; py2 = py1; py1 = y;
+        const z = rlb.b[0] * y + rlb.b[1] * rx1 + rlb.b[2] * rx2 - rlb.a[0] * ry1 - rlb.a[1] * ry2;
+        rx2 = rx1; rx1 = y; ry2 = ry1; ry1 = z;
+        const s = (i / seg) | 0;
+        if (s < nSeg) energy[s] += z * z;
+      }
+    });
+    const peakDb = peak > 0 ? 20 * Math.log10(peak) : -Infinity;
+    const maxPeak = Math.max.apply(null, peaks.concat([1e-9]));
+    const norm = peaks.map(p => Math.round(p / maxPeak * 1000) / 1000);
+    if (nSeg < 4) return { lufs: null, peakDb, peaks: norm };
+    const blocks = [];
+    for (let j = 0; j + 3 < nSeg; j++) blocks.push((energy[j] + energy[j + 1] + energy[j + 2] + energy[j + 3]) / (4 * seg));
+    const L = z => -0.691 + 10 * Math.log10(z);
+    const mean = arr => arr.reduce((a, b) => a + b, 0) / arr.length;
+    const abs = blocks.filter(z => z > 0 && L(z) > -70);
+    if (!abs.length) return { lufs: -Infinity, peakDb, peaks: norm };
+    const rel = L(mean(abs)) - 10;
+    const gated = abs.filter(z => L(z) > rel);
+    return { lufs: L(mean(gated)), peakDb, peaks: norm };
+  }
+
+  /* ---------- Sign-in (client-side demo) ---------- */
+
+  const SHA_K = [], SHA_H = [];
+  (function () {
+    const frac = x => ((x - Math.floor(x)) * 0x100000000) >>> 0;
+    for (let n = 2, found = 0; found < 64; n++) {
+      let prime = true;
+      for (let d = 2; d * d <= n; d++) if (n % d === 0) { prime = false; break; }
+      if (!prime) continue;
+      if (found < 8) SHA_H.push(frac(Math.sqrt(n)) | 0);
+      SHA_K.push(frac(Math.cbrt(n)) | 0);
+      found++;
+    }
+  })();
+
+  /** SHA-256 of a UTF-8 string, as lower-case hex (works without crypto.subtle). */
+  function sha256Hex(str) {
+    const ror = (x, r) => (x >>> r) | (x << (32 - r));
+    let bytes;
+    if (typeof TextEncoder !== 'undefined') bytes = Array.from(new TextEncoder().encode(String(str)));
+    else { const u = unescape(encodeURIComponent(String(str))); bytes = []; for (let i = 0; i < u.length; i++) bytes.push(u.charCodeAt(i)); }
+    const bitLen = bytes.length * 8;
+    bytes.push(0x80);
+    while (bytes.length % 64 !== 56) bytes.push(0);
+    const hi = Math.floor(bitLen / 0x100000000), lo = bitLen >>> 0;
+    for (let i = 3; i >= 0; i--) bytes.push((hi >>> (i * 8)) & 255);
+    for (let i = 3; i >= 0; i--) bytes.push((lo >>> (i * 8)) & 255);
+    const H = SHA_H.slice();
+    const W = new Array(64);
+    for (let off = 0; off < bytes.length; off += 64) {
+      for (let i = 0; i < 16; i++) W[i] = (bytes[off + 4 * i] << 24) | (bytes[off + 4 * i + 1] << 16) | (bytes[off + 4 * i + 2] << 8) | bytes[off + 4 * i + 3];
+      for (let i = 16; i < 64; i++) {
+        const s0 = ror(W[i - 15], 7) ^ ror(W[i - 15], 18) ^ (W[i - 15] >>> 3);
+        const s1 = ror(W[i - 2], 17) ^ ror(W[i - 2], 19) ^ (W[i - 2] >>> 10);
+        W[i] = (W[i - 16] + s0 + W[i - 7] + s1) | 0;
+      }
+      let a = H[0], b = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7];
+      for (let i = 0; i < 64; i++) {
+        const t1 = (h + (ror(e, 6) ^ ror(e, 11) ^ ror(e, 25)) + ((e & f) ^ (~e & g)) + SHA_K[i] + W[i]) | 0;
+        const t2 = ((ror(a, 2) ^ ror(a, 13) ^ ror(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) | 0;
+        h = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
+      }
+      H[0] = (H[0] + a) | 0; H[1] = (H[1] + b) | 0; H[2] = (H[2] + c) | 0; H[3] = (H[3] + d) | 0;
+      H[4] = (H[4] + e) | 0; H[5] = (H[5] + f) | 0; H[6] = (H[6] + g) | 0; H[7] = (H[7] + h) | 0;
+    }
+    return H.map(x => (x >>> 0).toString(16).padStart(8, '0')).join('');
+  }
+
+  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+  function validateLogin(f) {
+    const errors = {};
+    const email = String(f.email || '').trim();
+    if (!email) errors.email = 'Enter your email address.';
+    else if (!EMAIL_RE.test(email)) errors.email = 'Enter a valid email address, for example you@studio.com.';
+    if (!f.password) errors.password = 'Enter your password.';
+    return { valid: !Object.keys(errors).length, errors };
+  }
+
+  /** @param {string[]} existingEmails lower-case emails already registered */
+  function validateSignup(f, existingEmails) {
+    const errors = {};
+    const name = String(f.name || '').trim();
+    const email = String(f.email || '').trim().toLowerCase();
+    const pw = String(f.password || '');
+    if (!name) errors.name = 'Add your name.';
+    else if (name.length > 60) errors.name = 'Keep your name to 60 characters or fewer.';
+    if (!email) errors.email = 'Enter your email address.';
+    else if (!EMAIL_RE.test(email)) errors.email = 'Enter a valid email address, for example you@studio.com.';
+    else if ((existingEmails || []).indexOf(email) !== -1) errors.email = 'An account with this email already exists. Sign in instead.';
+    if (f.role !== 'podcaster' && f.role !== 'engineer') errors.role = 'Choose a role.';
+    if (pw.length < 8) errors.password = 'Use at least 8 characters.';
+    else if (!/[A-Za-z]/.test(pw) || !/\d/.test(pw)) errors.password = 'Use at least one letter and one number.';
+    if (!errors.password && f.confirm !== pw) errors.confirm = 'The passwords do not match.';
+    return { valid: !Object.keys(errors).length, errors };
+  }
+
+  /** 0–4 score with a label, for the password strength meter. */
+  function passwordStrength(pw) {
+    pw = String(pw || '');
+    let score = 0;
+    if (pw.length >= 8) score++;
+    if (pw.length >= 12) score++;
+    if (/[a-z]/.test(pw) && /[A-Z]/.test(pw)) score++;
+    if (/\d/.test(pw) && /[^A-Za-z0-9]/.test(pw)) score++;
+    if (pw.length < 8) score = Math.min(score, 1);
+    return { score, label: ['Too short', 'Weak', 'Fair', 'Good', 'Strong'][score] };
+  }
+
   const api = {
+    UPLOAD_RULES, formatBytes, validateUpload, estimateBitrateKbps, kWeightingCoeffs, measureLoudness,
+    sha256Hex, validateLogin, validateSignup, passwordStrength,
     QUALITY_RULES, parseISO, toISO, addDays, daysBetween, todayISO, eachDay,
     isNumeric, getFormat, validateEpisode, hasMissingAudioDetails, checkQuality, canPublish,
     statsInRange, summarize, growthPct, previousPeriod, playsPerDay, movingAverage,

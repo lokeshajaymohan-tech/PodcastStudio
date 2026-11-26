@@ -22,8 +22,14 @@
     charts: {},
     cleanups: [],
     tour: null,
-    firstRender: true
+    firstRender: true,
+    user: null,
+    users: [],
+    nextAfterLogin: null,
+    loginFails: 0,
+    lockUntil: 0
   };
+  const Media = window.PSMedia;
 
   /* =========================================================
      Helpers
@@ -214,8 +220,10 @@
     [/^#\/review(?:\/([\w-]+))?$/, m => renderReview(m[1]), 'review'],
     [/^#\/analytics$/, () => renderAnalytics(), 'analytics'],
     [/^#\/analytics\/([\w-]+)$/, m => renderEpisodeAnalytics(m[1]), 'analytics'],
-    [/^#\/about$/, () => renderAbout(), 'about']
+    [/^#\/about$/, () => renderAbout(), 'about'],
+    [/^#\/(login|signup)$/, m => renderAuth(m[1]), null]
   ];
+  const PUBLIC_ROUTES = /^#\/(login|signup)$/;
 
   function cleanup() {
     Object.values(state.charts).forEach(c => { try { c.destroy(); } catch (e) { /* ignore */ } });
@@ -227,7 +235,17 @@
   function router(opts) {
     opts = opts || {};
     cleanup();
-    const hash = location.hash || '#/home';
+    let hash = location.hash || '#/home';
+    // Sign-in guard (client-side demo only).
+    if (!state.user && !PUBLIC_ROUTES.test(hash)) {
+      state.nextAfterLogin = hash;
+      history.replaceState(null, '', '#/login');
+      hash = '#/login';
+    } else if (state.user && PUBLIC_ROUTES.test(hash)) {
+      history.replaceState(null, '', '#/home');
+      hash = '#/home';
+    }
+    document.body.classList.toggle('auth-mode', PUBLIC_ROUTES.test(hash));
     let navKey = null;
     let matched = false;
     for (const [re, fn, key] of ROUTES) {
@@ -241,8 +259,7 @@
       if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
     });
     if (!opts.keepPosition) {
-      state.prefs.lastScreen = hash;
-      savePrefs();
+      if (!PUBLIC_ROUTES.test(hash)) { state.prefs.lastScreen = hash; savePrefs(); }
       window.scrollTo(0, 0);
       const oc = bootstrap.Offcanvas.getInstance($('#sidebar'));
       if (oc) oc.hide();
@@ -259,6 +276,266 @@
     document.title = title + ' · PodcastStudio';
     $('#pageTitle').textContent = title;
     view().innerHTML = '<div class="fade-in">' + html + '</div>';
+  }
+
+  /* =========================================================
+     Theme (light / dark)
+     ========================================================= */
+  const cssVar = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  function chartColors() {
+    return { grid: cssVar('--ps-chart-grid') || '#F3F4F6', text: cssVar('--ps-chart-text') || '#4B5563', line2: cssVar('--ps-chart-line2') || '#1F2937' };
+  }
+  function effectiveTheme() {
+    const t = state.prefs.theme || 'system';
+    if (t === 'system') return window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    return t;
+  }
+  function applyTheme() {
+    const t = effectiveTheme();
+    document.documentElement.setAttribute('data-bs-theme', t);
+    const label = t === 'dark' ? 'Switch to light theme' : 'Switch to dark theme';
+    $$('.theme-toggle').forEach(b => {
+      b.innerHTML = '<i class="bi ' + (t === 'dark' ? 'bi-sun' : 'bi-moon-stars') + '" aria-hidden="true"></i>';
+      b.setAttribute('aria-label', label);
+      b.title = label;
+    });
+    const ml = $('#themeMenuLabel');
+    if (ml) ml.textContent = t === 'dark' ? 'Light theme' : 'Dark theme';
+    const meta = $('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', t === 'dark' ? '#0B0E17' : '#6D28D9');
+    restyleCharts();
+  }
+  function toggleTheme() {
+    state.prefs.theme = effectiveTheme() === 'dark' ? 'light' : 'dark';
+    savePrefs();
+    applyTheme();
+    toast((state.prefs.theme === 'dark' ? 'Dark' : 'Light') + ' theme on.', 'info');
+  }
+  /** Updates chart colours in place so forms on screen keep their input. */
+  function restyleCharts() {
+    if (!window.Chart) return;
+    const c = chartColors();
+    Chart.defaults.color = c.text;
+    Object.values(state.charts).forEach(ch => {
+      try {
+        Object.values(ch.options.scales || {}).forEach(s => {
+          if (s.grid && s.grid.display !== false) s.grid.color = c.grid;
+          if (s.ticks) s.ticks.color = c.text;
+        });
+        const lg = ch.options.plugins && ch.options.plugins.legend;
+        if (lg && lg.labels) lg.labels.color = c.text;
+        ch.data.datasets.forEach(d => { if (d.borderDash) d.borderColor = c.line2; });
+        ch.update('none');
+      } catch (e) { /* chart was destroyed */ }
+    });
+  }
+
+  /* =========================================================
+     Sign-in (client-side demo)
+     ========================================================= */
+  const initials = n => String(n || '?').trim().split(/\s+/).slice(0, 2).map(w => w[0]).join('').toUpperCase() || '?';
+
+  function syncUserUI() {
+    const u = state.user;
+    ['#userAvatar', '#userAvatar2'].forEach(s => { const el = $(s); if (el) el.textContent = u ? initials(u.name) : '?'; });
+    $('#userName').textContent = u ? u.name : '';
+    $('#userEmail').textContent = u ? u.email : '';
+    $('#userRole').textContent = u ? roleLabel(u.role) + ' account' : '';
+    $('#userBtn').setAttribute('aria-label', u ? 'Account menu for ' + u.name : 'Account menu');
+  }
+
+  function signIn(user, remember) {
+    if (!Store.writeSession(user.userId, remember)) {
+      toast('Your sign-in could not be remembered because browser storage is blocked. You will need to sign in again next time.', 'warning');
+    }
+    state.user = user;
+    state.loginFails = 0;
+    syncUserUI();
+    setRole(user.role, { silent: true, render: false });
+    toast('You are in the ' + roleLabel(user.role) + ' view.', 'success', 'Welcome, ' + user.name.split(' ')[0]);
+    const next = state.nextAfterLogin && !PUBLIC_ROUTES.test(state.nextAfterLogin) && state.nextAfterLogin !== '#/home'
+      ? state.nextAfterLogin : (user.role === 'engineer' ? '#/review' : '#/home');
+    state.nextAfterLogin = null;
+    navigate(next);
+  }
+
+  function signOut() {
+    stopLive();
+    if (state.tour) endTour();
+    Store.clearSession();
+    state.user = null;
+    syncUserUI();
+    toast('You are signed out.', 'info');
+    navigate('#/login');
+  }
+
+  function setFieldError(input, errEl, msg) {
+    input.classList.toggle('is-invalid', !!msg);
+    input.setAttribute('aria-invalid', msg ? 'true' : 'false');
+    errEl.textContent = msg || '';
+  }
+
+  function renderAuth(mode) {
+    const signup = mode === 'signup';
+    document.title = (signup ? 'Create account' : 'Sign in') + ' · PodcastStudio';
+    $('#pageTitle').textContent = signup ? 'Create account' : 'Sign in';
+    const counts = stageCounts();
+    const plays = R.summarize(R.statsInRange(state.stats, R.addDays(today(), -29), today()), episodesMap()).plays;
+    const pwField = (id, label, auto, describe) =>
+      '<label class="form-label" for="' + id + '">' + label + '</label><div class="pw-wrap">' +
+      '<input type="password" class="form-control" id="' + id + '" autocomplete="' + auto + '" aria-describedby="' + describe + ' err-' + id + '">' +
+      '<button type="button" class="pw-toggle" data-pw="' + id + '" aria-label="Show password" aria-pressed="false"><i class="bi bi-eye" aria-hidden="true"></i></button>' +
+      '<div class="invalid-feedback" id="err-' + id + '"></div></div>';
+
+    view().innerHTML =
+      '<div class="auth fade-in">' +
+        '<section class="auth-brand" aria-label="About PodcastStudio">' +
+          '<canvas id="heroWave" aria-hidden="true"></canvas>' +
+          '<span class="brand"><span class="brand-mark" aria-hidden="true"><i class="bi bi-soundwave"></i></span>PodcastStudio</span>' +
+          '<div><span class="eyebrow"><span class="dot-live" aria-hidden="true"></span>Podcast media management &amp; analytics</span>' +
+            '<h1 class="mt-3">Prepare, approve and measure every episode in one studio.</h1>' +
+            '<p>Upload mp3, m4a or mp4 files, check loudness against −16 LUFS, publish only what passes, and see how every episode performs.</p></div>' +
+          '<div class="auth-stats">' +
+            '<div class="auth-stat"><b data-count="' + state.episodes.length + '">0</b><span>episodes in the studio</span></div>' +
+            '<div class="auth-stat"><b data-count="' + counts.Published + '">0</b><span>published</span></div>' +
+            '<div class="auth-stat"><b data-count="' + plays + '">0</b><span>plays, last 30 days</span></div>' +
+          '</div>' +
+        '</section>' +
+        '<section class="auth-panel"><div class="auth-card">' +
+          '<div class="d-flex justify-content-end mb-3"><button type="button" class="theme-toggle" data-action="toggle-theme" aria-label="Switch theme"><i class="bi bi-moon-stars" aria-hidden="true"></i></button></div>' +
+          '<div class="ps-card" id="authCard">' +
+            '<div class="auth-tabs" role="tablist" aria-label="Sign in or create an account">' +
+              '<button type="button" role="tab" aria-selected="' + !signup + '" data-auth-tab="login">Sign in</button>' +
+              '<button type="button" role="tab" aria-selected="' + signup + '" data-auth-tab="signup">Create account</button>' +
+            '</div>' +
+            '<h2 class="h4 fw-bold mb-1">' + (signup ? 'Create your account' : 'Welcome back') + '</h2>' +
+            '<p class="text-muted-ps small mb-4">' + (signup ? 'Choose your role. You can still switch views inside the studio.' : 'Sign in to manage, review and measure your episodes.') + '</p>' +
+            '<div id="authAlert" role="alert" aria-live="assertive"></div>' +
+            (signup
+              ? '<form id="signupForm" novalidate>' +
+                  '<div class="mb-3"><label class="form-label" for="su-name">Full name</label><input type="text" class="form-control" id="su-name" autocomplete="name" maxlength="80" aria-describedby="err-su-name"><div class="invalid-feedback" id="err-su-name"></div></div>' +
+                  '<div class="mb-3"><label class="form-label" for="su-email">Email</label><input type="email" class="form-control" id="su-email" autocomplete="email" aria-describedby="err-su-email"><div class="invalid-feedback" id="err-su-email"></div></div>' +
+                  '<fieldset class="mb-3"><legend class="form-label float-none mb-1" style="font-size:.9rem">I am a…</legend><div class="role-pick">' +
+                    '<input type="radio" class="btn-check" name="su-role" id="su-pod" value="podcaster" checked><label for="su-pod"><i class="bi bi-mic-fill" aria-hidden="true"></i>Podcaster</label>' +
+                    '<input type="radio" class="btn-check" name="su-role" id="su-eng" value="engineer"><label for="su-eng"><i class="bi bi-sliders" aria-hidden="true"></i>Audio Engineer</label>' +
+                  '</div></fieldset>' +
+                  '<div class="mb-3">' + pwField('su-pw', 'Password', 'new-password', 'pwHelp') +
+                    '<div class="strength" id="pwStrength" data-score="0" aria-hidden="true"><i></i><i></i><i></i><i></i></div>' +
+                    '<div class="form-text" id="pwHelp">At least 8 characters with a letter and a number. <span id="pwLabel"></span></div></div>' +
+                  '<div class="mb-4">' + pwField('su-pw2', 'Confirm password', 'new-password', 'pwHelp') + '</div>' +
+                  '<button type="submit" class="btn btn-primary btn-lg w-100"><i class="bi bi-person-plus me-1" aria-hidden="true"></i>Create account</button>' +
+                '</form>'
+              : '<form id="loginForm" novalidate>' +
+                  '<div class="mb-3"><label class="form-label" for="li-email">Email</label><input type="email" class="form-control" id="li-email" autocomplete="username" aria-describedby="err-li-email"><div class="invalid-feedback" id="err-li-email"></div></div>' +
+                  '<div class="mb-3">' + pwField('li-pw', 'Password', 'current-password', 'li-email') + '</div>' +
+                  '<div class="form-check mb-4"><input class="form-check-input" type="checkbox" id="li-remember" checked><label class="form-check-label small" for="li-remember">Keep me signed in on this device</label></div>' +
+                  '<button type="submit" class="btn btn-primary btn-lg w-100" id="li-submit"><i class="bi bi-box-arrow-in-right me-1" aria-hidden="true"></i>Sign in</button>' +
+                '</form>' +
+                '<div class="divider">or try a demo account</div>' +
+                '<div class="demo-accounts">' +
+                  Store.DEMO_USERS.map(u => '<button type="button" class="demo-btn" data-demo="' + esc(u.email) + '"><strong><i class="bi ' + (u.role === 'engineer' ? 'bi-sliders' : 'bi-mic-fill') + '" aria-hidden="true"></i>' + roleLabel(u.role) + '</strong><span>' + esc(u.email) + '</span></button>').join('') +
+                '</div>' +
+                '<p class="small text-muted-ps mt-2 mb-0 text-center">Demo password: <code>' + esc(Store.DEMO_PASSWORD) + '</code></p>') +
+          '</div>' +
+          '<p class="auth-foot"><i class="bi bi-shield-lock me-1" aria-hidden="true"></i>Demo sign-in: accounts are stored only in this browser, and passwords are salted and hashed. This is not real security.</p>' +
+        '</div></section>' +
+      '</div>';
+
+    applyTheme();
+    startHeroWave();
+    countUp(view());
+    $$('[data-auth-tab]').forEach(b => b.addEventListener('click', () => navigate('#/' + b.dataset.authTab)));
+    $$('.pw-toggle').forEach(b => b.addEventListener('click', () => {
+      const i = document.getElementById(b.dataset.pw);
+      const show = i.type === 'password';
+      i.type = show ? 'text' : 'password';
+      b.setAttribute('aria-pressed', String(show));
+      b.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+      b.innerHTML = '<i class="bi ' + (show ? 'bi-eye-slash' : 'bi-eye') + '" aria-hidden="true"></i>';
+    }));
+    const alertBox = $('#authAlert');
+    const fail = html => {
+      alertBox.innerHTML = '<div class="mb-3">' + alertHTML('error', html) + '</div>';
+      const card = $('#authCard');
+      if (!reduceMotion()) { card.classList.remove('shake'); void card.offsetWidth; card.classList.add('shake'); }
+    };
+
+    if (!signup) {
+      const email = $('#li-email'), pw = $('#li-pw'), btn = $('#li-submit');
+      email.focus();
+      let lockTimer = null;
+      const lockTick = () => {
+        const left = Math.ceil((state.lockUntil - Date.now()) / 1000);
+        if (left <= 0) { clearInterval(lockTimer); btn.disabled = false; btn.innerHTML = '<i class="bi bi-box-arrow-in-right me-1" aria-hidden="true"></i>Sign in'; alertBox.innerHTML = ''; return; }
+        btn.disabled = true;
+        btn.textContent = 'Try again in ' + left + 's';
+      };
+      if (state.lockUntil > Date.now()) { lockTimer = setInterval(lockTick, 500); lockTick(); }
+      state.cleanups.push(() => clearInterval(lockTimer));
+
+      $('#loginForm').addEventListener('submit', ev => {
+        ev.preventDefault();
+        if (state.lockUntil > Date.now()) return;
+        const v = R.validateLogin({ email: email.value, password: pw.value });
+        setFieldError(email, $('#err-li-email'), v.errors.email);
+        setFieldError(pw, $('#err-li-pw'), v.errors.password);
+        if (!v.valid) { (v.errors.email ? email : pw).focus(); return; }
+        const u = state.users.find(x => x.email === email.value.trim().toLowerCase());
+        if (!u || !Store.checkPassword(u, pw.value)) {
+          state.loginFails++;
+          if (state.loginFails >= 5) {
+            state.loginFails = 0;
+            state.lockUntil = Date.now() + 30000;
+            fail('<strong>Too many attempts.</strong> For your safety, sign-in is paused for 30 seconds.');
+            lockTimer = setInterval(lockTick, 500); lockTick();
+          } else {
+            fail('<strong>The email or password is incorrect.</strong> Check them and try again. ' + (5 - state.loginFails) + ' attempt' + (5 - state.loginFails === 1 ? '' : 's') + ' left before a short pause.');
+          }
+          pw.value = '';
+          pw.focus();
+          return;
+        }
+        signIn(u, $('#li-remember').checked);
+      });
+      $$('[data-demo]').forEach(b => b.addEventListener('click', () => {
+        email.value = b.dataset.demo;
+        pw.value = Store.DEMO_PASSWORD;
+        alertBox.innerHTML = '';
+        $('#loginForm').requestSubmit ? $('#loginForm').requestSubmit() : btn.click();
+      }));
+    } else {
+      const f = { name: $('#su-name'), email: $('#su-email'), pw: $('#su-pw'), pw2: $('#su-pw2') };
+      f.name.focus();
+      f.pw.addEventListener('input', () => {
+        const s = R.passwordStrength(f.pw.value);
+        $('#pwStrength').dataset.score = String(f.pw.value ? Math.max(1, s.score) : 0);
+        $('#pwLabel').textContent = f.pw.value ? 'Strength: ' + s.label + '.' : '';
+      });
+      $('#signupForm').addEventListener('submit', ev => {
+        ev.preventDefault();
+        const role = ($('input[name="su-role"]:checked') || {}).value;
+        const data = { name: f.name.value, email: f.email.value, role, password: f.pw.value, confirm: f.pw2.value };
+        const v = R.validateSignup(data, state.users.map(u => u.email));
+        setFieldError(f.name, $('#err-su-name'), v.errors.name);
+        setFieldError(f.email, $('#err-su-email'), v.errors.email);
+        setFieldError(f.pw, $('#err-su-pw'), v.errors.password);
+        setFieldError(f.pw2, $('#err-su-pw2'), v.errors.confirm);
+        if (!v.valid) {
+          fail('<strong>Check the highlighted fields.</strong> ' + esc(Object.values(v.errors)[0]));
+          const first = v.errors.name ? f.name : v.errors.email ? f.email : v.errors.password ? f.pw : f.pw2;
+          first.focus();
+          return;
+        }
+        const user = Store.makeUser({ name: data.name.trim(), email: data.email, role }, data.password);
+        const users = state.users.concat([user]);
+        if (state.storageOk && !Store.save('users', users)) {
+          fail('<strong>Your account could not be saved.</strong> Browser storage may be full or blocked. Your details are still here, so you can try again.');
+          return;
+        }
+        state.users = users;
+        signIn(user, true);
+      });
+    }
   }
 
   /* =========================================================
@@ -338,15 +615,80 @@
     });
   }
 
-  function waveformHTML(seedStr, bars) {
+  function waveformHTML(seedStr, bars, peaks) {
     const rnd = mulberry(hashSeed(seedStr));
+    const real = Array.isArray(peaks) && peaks.length > 0;
     let out = '';
     for (let i = 0; i < bars; i++) {
-      const env = Math.sin((i / bars) * Math.PI) * 0.6 + 0.4;
-      const h = Math.round(clamp((0.25 + rnd() * 0.75) * env, 0.08, 1) * 100);
+      let v;
+      if (real) {
+        const a = Math.floor(i * peaks.length / bars), b = Math.max(a + 1, Math.floor((i + 1) * peaks.length / bars));
+        v = Math.max.apply(null, peaks.slice(a, b));
+      } else {
+        v = (0.25 + rnd() * 0.75) * (Math.sin((i / bars) * Math.PI) * 0.6 + 0.4);
+      }
+      const h = Math.round(clamp(v, 0.06, 1) * 100);
       out += '<span style="height:' + h + '%;animation-delay:' + (i * 8) + 'ms"></span>';
     }
-    return '<div class="waveform" aria-hidden="true">' + out + '</div>';
+    return '<div class="waveform' + (real ? ' real' : '') + '" aria-hidden="true">' + out + '</div>';
+  }
+
+  /* ---------- Upload & media helpers ---------- */
+  const ACCEPT = '.mp3,.m4a,.mp4,.aac,.wav,.ogg,.opus,.flac,.webm,.mov,.m4v,audio/*,video/mp4';
+  function trackURL(url) { state.cleanups.push(() => URL.revokeObjectURL(url)); return url; }
+  function fileChipsHTML(info) {
+    return '<div class="file-facts">' +
+      (info.format ? '<span class="chip chip-primary">' + esc(info.format.toUpperCase()) + '</span>' : '') +
+      '<span class="chip">' + (info.kind === 'video' ? '<i class="bi bi-camera-video" aria-hidden="true"></i>Video' : '<i class="bi bi-music-note-beamed" aria-hidden="true"></i>Audio') + '</span>' +
+      (info.size ? '<span class="chip">' + esc(R.formatBytes(info.size)) + '</span>' : '') +
+      (info.duration ? '<span class="chip"><i class="bi bi-clock" aria-hidden="true"></i>' + esc(fmtDur(info.duration)) + '</span>' : '') +
+      (info.bitrate ? '<span class="chip" title="Estimated from file size and length">≈ ' + info.bitrate + ' kbps' + (info.kind === 'video' ? ' total' : '') + '</span>' : '') +
+      '</div>';
+  }
+  function playerHTML(url, kind, label) {
+    return kind === 'video'
+      ? '<video class="player" controls preload="metadata" playsinline src="' + url + '" aria-label="' + esc(label) + '"></video>'
+      : '<audio class="player" controls preload="metadata" src="' + url + '" aria-label="' + esc(label) + '"></audio>';
+  }
+  function measuredHTML(res) {
+    if (res.lufs == null) return '<div class="mt-2">' + alertHTML('warning', 'This clip is shorter than 0.4 seconds, so its loudness cannot be measured.') + '</div>';
+    if (res.lufs === -Infinity) return '<div class="mt-2">' + alertHTML('warning', 'This file is silent, so it has no measurable loudness.') + '</div>';
+    const c = R.checkQuality({ loudnessLufs: res.lufs.toFixed(1), bitrateKbps: 320, audioFileName: 'x.mp3' }).checks[0];
+    return '<div class="measure-box fade-in"><div class="d-flex flex-wrap gap-4 align-items-center">' +
+      '<div><div class="small text-muted-ps">Integrated loudness</div><div class="lufs">' + res.lufs.toFixed(1) + ' LUFS</div></div>' +
+      '<div><div class="small text-muted-ps">Sample peak</div><div class="fw-bold">' + (isFinite(res.peakDb) ? res.peakDb.toFixed(1) + ' dBFS' : '—') + '</div></div>' +
+      '<span class="ps-badge ' + (c.pass ? 'b-published' : 'b-error') + '"><i class="bi ' + (c.pass ? 'bi-check-circle-fill' : 'bi-x-circle-fill') + '" aria-hidden="true"></i>' + (c.pass ? 'Loudness passes' : esc(c.detail)) + '</span>' +
+      '</div>' + waveformHTML('m', 80, res.peaks) +
+      '<p class="small text-muted-ps mb-0 mt-1">Measured in this browser with ITU-R BS.1770 gating (approximate). Target −16 LUFS ±1.</p></div>';
+  }
+  async function runMeasure(blob, durationSec, box, btn) {
+    const old = btn ? btn.innerHTML : '';
+    if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin me-1" aria-hidden="true"></span>Measuring…'; }
+    box.innerHTML = '<p class="small text-muted-ps mt-2 mb-0" role="status">Decoding and measuring the audio. Longer files take a few seconds…</p>';
+    try {
+      const res = await Media.analyzeAudio(blob, { durationSec });
+      box.innerHTML = measuredHTML(res);
+      return res;
+    } catch (e) {
+      box.innerHTML = '<div class="mt-2">' + alertHTML('warning', esc(Media.analysisMessage(e))) + '</div>';
+      return null;
+    } finally {
+      if (btn && document.body.contains(btn)) { btn.disabled = false; btn.innerHTML = old; }
+    }
+  }
+  /** Loads an episode's stored file from IndexedDB into `slot` as a player. */
+  function loadStoredMedia(ep, slot, onBlob) {
+    if (!ep.fileStored || !slot) return;
+    slot.innerHTML = '<p class="small text-muted-ps my-2" role="status"><span class="spin me-1" aria-hidden="true"></span>Loading the uploaded file…</p>';
+    Media.FileStore.get(ep.episodeId).then(rec => {
+      if (!document.body.contains(slot)) return;
+      if (!rec || !rec.blob) {
+        slot.innerHTML = '<div class="my-2">' + alertHTML('warning', 'The uploaded file is not in this browser. Files are kept only in the browser where they were uploaded.') + '</div>';
+        return;
+      }
+      slot.innerHTML = playerHTML(trackURL(URL.createObjectURL(rec.blob)), ep.fileKind, 'Play ' + ep.title);
+      if (onBlob) onBlob(rec.blob);
+    }).catch(e => { if (document.body.contains(slot)) slot.innerHTML = '<div class="my-2">' + alertHTML('warning', esc(Media.storageMessage(e))) + '</div>'; });
   }
   function mulberry(a) {
     return function () {
@@ -762,11 +1104,13 @@
               '<div class="col-12"><div class="d-flex justify-content-between"><label class="form-label" for="f-description">Description <span class="text-danger" aria-hidden="true">*</span></label><span class="counter" id="c-description"></span></div>' +
                 '<textarea class="form-control" id="f-description" name="description" rows="4" maxlength="1100" required aria-describedby="err-description" placeholder="What is this episode about?">' + esc(ep.description) + '</textarea>' +
                 '<div class="invalid-feedback" id="err-description"></div></div>' +
+              '<div class="col-12"><span class="form-label d-block" id="uploadLabel">Episode file <span class="small text-muted-ps fw-normal">optional · mp3, m4a or mp4 · up to 300 MB</span></span>' +
+                '<div id="uploadArea"></div><div class="small fw-semibold mt-2" id="err-upload" role="alert" style="color:var(--ps-error)"></div></div>' +
               '<div class="col-12 col-md-7"><label class="form-label" for="f-audioFileName">Audio file name <span class="text-danger" aria-hidden="true">*</span></label>' +
                 '<div class="input-group has-validation"><span class="input-group-text"><i class="bi bi-file-earmark-music" aria-hidden="true"></i></span>' +
                 '<input type="text" class="form-control" id="f-audioFileName" name="audioFileName" value="' + esc(ep.audioFileName) + '" required aria-describedby="hint-file err-audioFileName" placeholder="episode-12.mp3"' + (published ? ' readonly' : '') + '>' +
                 '<div class="invalid-feedback" id="err-audioFileName"></div></div>' +
-                '<div class="form-text" id="hint-file">mp3 or m4a passes the format check. No audio is uploaded; only the name is stored.</div></div>' +
+                '<div class="form-text" id="hint-file">Filled in when you upload a file, or type the name. mp3, m4a or mp4 passes the format check.</div></div>' +
               '<fieldset class="col-12 col-md-5"><legend class="form-label float-none mb-1" style="font-size:.9rem">Duration <span class="text-danger" aria-hidden="true">*</span></legend>' +
                 '<div class="input-group has-validation">' +
                   '<input type="number" inputmode="numeric" class="form-control" id="f-min" min="0" max="359" step="1" value="' + mins + '" aria-label="Minutes" aria-describedby="err-durationSec dur-out"' + (published ? ' readonly' : '') + '><span class="input-group-text">min</span>' +
@@ -851,7 +1195,7 @@
       $('#fmtPreview').innerHTML = !fmt ? '<span class="small text-muted-ps">Add a file name to preview the format check.</span>'
         : R.QUALITY_RULES.allowedFormats.indexOf(fmt) !== -1
           ? '<span class="ps-badge b-published"><i class="bi bi-check-circle-fill" aria-hidden="true"></i>.' + esc(fmt) + ' passes</span>'
-          : '<span class="ps-badge b-error"><i class="bi bi-x-circle-fill" aria-hidden="true"></i>.' + esc(fmt) + ' will fail</span><p class="small mt-2 mb-0" style="color:var(--ps-warning)">Export as mp3 or m4a before sending for review.</p>';
+          : '<span class="ps-badge b-error"><i class="bi bi-x-circle-fill" aria-hidden="true"></i>.' + esc(fmt) + ' will fail</span><p class="small mt-2 mb-0" style="color:var(--ps-warning)">Export as mp3, m4a or mp4 before sending for review.</p>';
       const d = Number.isFinite(f.durationSec) && f.durationSec > 0 ? fmtDur(f.durationSec) : '';
       $('#dur-out').textContent = d ? 'Total: ' + d + ' (' + fmtNum(f.durationSec) + ' seconds)' : 'Enter minutes and seconds.';
       [['title', 120], ['description', 1000]].forEach(([k, max]) => {
@@ -867,14 +1211,116 @@
     form.addEventListener('change', updateSide);
     updateSide();
 
+    /* ----- Upload (stored in IndexedDB on save) ----- */
+    let upload = editing && editing.fileStored ? { mode: 'stored' } : { mode: 'none' };
+    let removeStored = false;
+    let measured = null;
+    let storedBlob = null;
+    const nameInput = $('#f-audioFileName');
+
+    const renderUpload = () => {
+      const area = $('#uploadArea');
+      if (!area) return;
+      nameInput.readOnly = !!published || upload.mode === 'pending' || upload.mode === 'stored';
+      if (upload.mode === 'reading') {
+        area.innerHTML = '<div class="file-card" role="status"><div class="d-flex gap-2 align-items-center"><span class="spin" aria-hidden="true"></span><span>Reading <strong>' + esc(upload.file.name) + '</strong>…</span></div><div class="upload-progress" aria-hidden="true"><i></i></div></div>';
+        return;
+      }
+      if (upload.mode === 'none') {
+        if (published) { area.innerHTML = '<p class="small text-muted-ps mb-0">Audio details are locked after publishing.</p>'; return; }
+        area.innerHTML = '<div class="dropzone" id="dropzone"><input type="file" id="f-file" accept="' + ACCEPT + '" aria-labelledby="uploadLabel" aria-describedby="dzHelp err-upload">' +
+          '<div class="dz-body"><div class="dz-icon" aria-hidden="true"><i class="bi bi-cloud-arrow-up"></i></div><div class="dz-title">Drop your episode here, or click to browse</div>' +
+          '<div class="dz-sub" id="dzHelp">mp3, m4a or mp4 · up to 300 MB · the file stays in this browser and is never sent to a server</div></div></div>';
+        const dz = $('#dropzone'), input = $('#f-file');
+        ['dragenter', 'dragover'].forEach(t => dz.addEventListener(t, e => { e.preventDefault(); dz.classList.add('drag'); }));
+        ['dragleave', 'drop'].forEach(t => dz.addEventListener(t, () => dz.classList.remove('drag')));
+        dz.addEventListener('drop', e => { e.preventDefault(); const fl = e.dataTransfer && e.dataTransfer.files[0]; if (fl) handleFile(fl); });
+        input.addEventListener('change', () => { if (input.files[0]) handleFile(input.files[0]); });
+        return;
+      }
+      const pending = upload.mode === 'pending';
+      const kind = pending ? (upload.meta.hasVideo ? 'video' : 'audio') : (editing.fileKind || 'audio');
+      const info = pending
+        ? { name: upload.file.name, format: R.getFormat(upload.file.name), size: upload.file.size, duration: upload.meta.duration, kind, bitrate: R.estimateBitrateKbps(upload.file.size, upload.meta.duration) }
+        : { name: editing.audioFileName, format: R.getFormat(editing.audioFileName), size: editing.fileSizeBytes, duration: editing.durationSec, kind, bitrate: R.estimateBitrateKbps(editing.fileSizeBytes, editing.durationSec) };
+      area.innerHTML = '<div class="file-card fade-in"><div class="file-head"><span class="file-icon" aria-hidden="true"><i class="bi ' + (kind === 'video' ? 'bi-camera-video' : 'bi-file-earmark-music') + '"></i></span>' +
+        '<div class="min-w-0 flex-grow-1"><div class="file-name">' + esc(info.name) + '</div>' + fileChipsHTML(info) + '</div>' +
+        (published ? '' : '<div class="d-flex gap-1 flex-shrink-0"><label class="btn btn-sm btn-outline-secondary mb-0" for="f-file2">Replace</label><input type="file" id="f-file2" class="visually-hidden" accept="' + ACCEPT + '" aria-label="Replace file">' +
+          '<button type="button" class="btn btn-sm btn-outline-danger" id="removeFile" aria-label="Remove file"><i class="bi bi-trash" aria-hidden="true"></i></button></div>') +
+        '</div>' +
+        (pending && upload.warning ? '<div class="mt-3">' + alertHTML('warning', esc(upload.warning)) + '</div>' : '') +
+        '<div id="mediaSlot">' + (pending ? playerHTML(upload.url, kind, 'Preview ' + info.name) : '') + '</div>' +
+        '<div class="mt-3 d-flex flex-wrap align-items-center gap-2"><button type="button" class="btn btn-sm btn-outline-primary" id="precheck"><i class="bi bi-activity me-1" aria-hidden="true"></i>Pre-check loudness</button>' +
+        '<span class="small text-muted-ps">Measures LUFS in your browser (files up to 30 min).</span></div>' +
+        '<div id="measureOut">' + (measured ? measuredHTML(measured) : '') + '</div></div>';
+      if (!pending) loadStoredMedia(editing, $('#mediaSlot'), b => { storedBlob = b; });
+      const f2 = $('#f-file2');
+      if (f2) f2.addEventListener('change', () => { if (f2.files[0]) handleFile(f2.files[0]); });
+      const rm = $('#removeFile');
+      if (rm) rm.addEventListener('click', () => {
+        if (upload.mode === 'stored') removeStored = true;
+        upload = { mode: 'none' };
+        measured = null;
+        $('#err-upload').textContent = '';
+        renderUpload();
+        updateSide();
+        toast('File removed. Save the episode to keep this change.', 'info');
+        const inp = $('#f-file'); if (inp) inp.focus();
+      });
+      const pc = $('#precheck');
+      pc.addEventListener('click', async () => {
+        const blob = upload.mode === 'pending' ? upload.file : storedBlob;
+        if (!blob) { $('#measureOut').innerHTML = '<div class="mt-2">' + alertHTML('info', 'The file is still loading. Try again in a moment.') + '</div>'; return; }
+        const res = await runMeasure(blob, info.duration, $('#measureOut'), pc);
+        if (res && isFinite(res.lufs)) measured = res;
+      });
+    };
+
+    const handleFile = async file => {
+      const err = $('#err-upload');
+      err.textContent = '';
+      const v = R.validateUpload(file);
+      const prev = upload;
+      if (!v.ok) {
+        err.textContent = v.error;
+        const dz = $('#dropzone'); if (dz) dz.classList.add('is-error');
+        return;
+      }
+      upload = { mode: 'reading', file };
+      renderUpload();
+      let meta;
+      try {
+        meta = await Media.readMetadata(file);
+        if (!(meta.duration > 0) || !isFinite(meta.duration)) throw new Error('no-duration');
+      } catch (e) {
+        upload = prev;
+        renderUpload();
+        $('#err-upload').textContent = '"' + file.name + '" could not be read. It may be damaged, or this browser cannot play this format. Export it again as mp3, m4a or mp4 and try again.';
+        return;
+      }
+      if (!$('#uploadArea')) return;
+      upload = { mode: 'pending', file, meta, url: trackURL(URL.createObjectURL(file)), warning: v.warning };
+      measured = null;
+      nameInput.value = file.name;
+      const d = Math.max(1, Math.round(meta.duration));
+      $('#f-min').value = Math.floor(d / 60);
+      $('#f-sec').value = d % 60;
+      renderUpload();
+      updateSide();
+      toast('"' + file.name + '" is ready (' + fmtDur(d) + '). It will be saved with the episode.', 'success', 'File added');
+    };
+    renderUpload();
+
     const auto = $('#autofill');
     if (auto) auto.addEventListener('click', () => {
       $('#f-show').value = (state.shows[0] || {}).showId || '';
       $('#f-title').value = 'Behind the Mic: A Live Studio Demo';
       $('#f-description').value = 'We take one episode from draft to published in real time and look at its first listener numbers.';
-      $('#f-audioFileName').value = 'sn-live-demo.mp3';
-      $('#f-min').value = 24;
-      $('#f-sec').value = 30;
+      if (upload.mode === 'none') {
+        $('#f-audioFileName').value = 'sn-live-demo.mp3';
+        $('#f-min').value = 24;
+        $('#f-sec').value = 30;
+      }
       $('#f-releaseDate').value = today();
       updateSide();
       toast('Example details added. Choose "Save & send for review" to continue.', 'info');
@@ -910,11 +1356,39 @@
       }
 
       const now = nowISO();
+      const btns = $$('button[type="submit"]', form);
+      btns.forEach(b => { b.disabled = true; });
+      const unlock = () => btns.forEach(b => { b.disabled = false; });
+      const epId = editing ? editing.episodeId : 'ep-' + Date.now().toString(36);
+      const round1 = x => (x != null && isFinite(x) ? Math.round(x * 10) / 10 : null);
+      let fileFields = null;
+      if (upload.mode === 'pending') {
+        try {
+          await Media.FileStore.put(epId, upload.file);
+        } catch (e) {
+          unlock();
+          summary.innerHTML = '<div class="mb-3" role="alert">' + alertHTML('error', '<strong>Upload failed, so the episode was not saved.</strong> ' + esc(Media.storageMessage(e)) + ' Your details are still here.') + '</div>';
+          summary.focus();
+          return;
+        }
+        const kind = upload.meta.hasVideo ? 'video' : 'audio';
+        fileFields = {
+          fileStored: true, fileSizeBytes: upload.file.size, fileType: upload.file.type || '', fileKind: kind,
+          estBitrateKbps: kind === 'audio' ? R.estimateBitrateKbps(upload.file.size, upload.meta.duration) : null,
+          measuredLufs: measured ? round1(measured.lufs) : null, peakDb: measured ? round1(measured.peakDb) : null,
+          peaks: measured ? measured.peaks : null, uploadedAt: now
+        };
+      } else if (removeStored) {
+        fileFields = { fileStored: false, fileSizeBytes: null, fileType: null, fileKind: null, estBitrateKbps: null, measuredLufs: null, peakDb: null, peaks: null, uploadedAt: null };
+      } else if (upload.mode === 'stored' && measured) {
+        fileFields = { measuredLufs: round1(measured.lufs), peakDb: round1(measured.peakDb), peaks: measured.peaks };
+      }
+      const fileChanged = upload.mode === 'pending' || removeStored;
       let saved, message, type = 'success', title2;
       if (editing) {
-        saved = Object.assign({}, editing, f, { updatedAt: now });
+        saved = Object.assign({}, editing, f, fileFields || {}, { updatedAt: now });
         if (published) { saved.audioFileName = editing.audioFileName; saved.durationSec = editing.durationSec; }
-        const audioChanged = editing.audioFileName !== saved.audioFileName || Number(editing.durationSec) !== Number(saved.durationSec);
+        const audioChanged = fileChanged || editing.audioFileName !== saved.audioFileName || Number(editing.durationSec) !== Number(saved.durationSec);
         if (approved && audioChanged) {
           Object.assign(saved, { status: 'Draft', qcStatus: 'Not submitted', loudnessLufs: null, bitrateKbps: null, qcNote: '' });
           message = 'Changes saved. The audio details changed, so this episode needs a new quality check.';
@@ -926,20 +1400,22 @@
           message = 'Changes saved and sent for review. The audio engineer will see it in the Review Queue.';
           type = 'success';
         }
-        if (!commit({ episodes: replaceEpisode(saved) })) { summary.innerHTML = '<div class="mb-3">' + alertHTML('error', '<strong>Data could not be saved.</strong> Your form is still here. Free up browser storage or try again.') + '</div>'; summary.focus(); return; }
+        if (!commit({ episodes: replaceEpisode(saved) })) { unlock(); summary.innerHTML = '<div class="mb-3">' + alertHTML('error', '<strong>Data could not be saved.</strong> Your form is still here. Free up browser storage or try again.') + '</div>'; summary.focus(); return; }
+        if (removeStored && upload.mode !== 'pending') Media.FileStore.remove(epId).catch(() => {});
         title2 = 'Saved';
       } else {
-        saved = {
-          episodeId: 'ep-' + Date.now().toString(36),
+        saved = Object.assign({
+          episodeId: epId, createdBy: state.user ? state.user.name : '',
           showId: f.showId, title: f.title, description: f.description, audioFileName: f.audioFileName,
           durationSec: f.durationSec, status: 'Draft', qcStatus: intent === 'send' ? 'Awaiting review' : 'Not submitted',
           qcNote: '', loudnessLufs: null, bitrateKbps: null, releaseDate: f.releaseDate, publishedAt: null,
           createdAt: now, submittedAt: intent === 'send' ? now : null, reviewedAt: null, updatedAt: now, reviews: []
-        };
-        if (!commit({ episodes: state.episodes.concat([saved]) })) { summary.innerHTML = '<div class="mb-3">' + alertHTML('error', '<strong>Data could not be saved.</strong> Your form is still here. Free up browser storage or try again.') + '</div>'; summary.focus(); return; }
+        }, fileFields || {});
+        if (!commit({ episodes: state.episodes.concat([saved]) })) { unlock(); if (upload.mode === 'pending') Media.FileStore.remove(epId).catch(() => {}); summary.innerHTML = '<div class="mb-3">' + alertHTML('error', '<strong>Data could not be saved.</strong> Your form is still here. Free up browser storage or try again.') + '</div>'; summary.focus(); return; }
         message = intent === 'send'
           ? 'Episode saved and sent for review. The audio engineer will see it in the Review Queue.'
           : 'Episode saved as a draft. Send it for review when the audio is ready.';
+        if (fileFields && fileFields.fileStored) message += ' The file is stored in this browser.';
         title2 = 'Episode saved';
         tourEvent('create', saved);
       }
@@ -1006,13 +1482,18 @@
       '<div class="row g-4">' +
         '<div class="col-lg-8">' +
           '<section class="ps-card mb-4"><div class="card-header"><h2 class="card-title">Episode details</h2></div><div class="card-body">' +
-            waveformHTML(ep.episodeId, 90) +
-            '<p class="small text-muted-ps mt-1 mb-3"><i class="bi bi-info-circle me-1" aria-hidden="true"></i>Illustrative waveform. No audio is hosted in this demo.</p>' +
+            waveformHTML(ep.episodeId, 90, ep.peaks) +
+            (ep.fileStored
+              ? '<div id="mediaSlot" class="mb-3"></div>'
+              : '<p class="small text-muted-ps mt-1 mb-3"><i class="bi bi-info-circle me-1" aria-hidden="true"></i>Illustrative waveform. No file was uploaded for this episode' +
+                (pod && ep.status !== 'Published' ? ': <a href="#/episode/' + esc(ep.episodeId) + '/edit">upload an mp3, m4a or mp4</a>' : '') + '.</p>') +
+            (ep.measuredLufs != null ? '<p class="mb-3"><span class="chip"><i class="bi bi-activity" aria-hidden="true"></i>Podcaster pre-check: ' + esc(ep.measuredLufs) + ' LUFS' + (ep.peakDb != null ? ' · peak ' + esc(ep.peakDb) + ' dBFS' : '') + '</span></p>' : '') +
             '<p>' + esc(ep.description || 'No description yet.') + '</p>' +
             '<dl class="meta-grid">' +
               '<div><dt>Audio file</dt><dd>' + (ep.audioFileName ? esc(ep.audioFileName) : '<span style="color:var(--ps-warning)">Missing</span>') + '</dd></div>' +
-              '<div><dt>Format</dt><dd>' + (fmt ? '.' + esc(fmt) : '—') + '</dd></div>' +
+              '<div><dt>Format</dt><dd>' + (fmt ? '.' + esc(fmt) : '—') + (ep.fileKind ? ' · ' + (ep.fileKind === 'video' ? 'video' : 'audio') : '') + '</dd></div>' +
               '<div><dt>Duration</dt><dd>' + (ep.durationSec ? esc(fmtDur(ep.durationSec)) : '<span style="color:var(--ps-warning)">Missing</span>') + '</dd></div>' +
+              '<div><dt>Uploaded file</dt><dd>' + (ep.fileStored ? esc(R.formatBytes(ep.fileSizeBytes)) + (ep.estBitrateKbps ? ' · ≈ ' + ep.estBitrateKbps + ' kbps' : '') : 'None') + '</dd></div>' +
               '<div><dt>Release date</dt><dd>' + esc(fmtDate(ep.releaseDate)) + '</dd></div>' +
               '<div><dt>Host</dt><dd>' + esc((showById(ep.showId) || {}).hostName || '—') + '</dd></div>' +
               '<div><dt>Episode ID</dt><dd><code>' + esc(ep.episodeId) + '</code></dd></div>' +
@@ -1028,11 +1509,17 @@
             (hasQC
               ? '<ul class="checklist mb-3">' + q.checks.map(checkItemHTML).join('') + '</ul>' +
                 (ep.qcNote ? '<p class="small fw-bold mb-1">Engineer note</p><blockquote class="small mb-2 p-2 rounded" style="background:var(--ps-bg);border-left:3px solid var(--ps-primary)">' + esc(ep.qcNote) + '</blockquote>' : '') +
-                '<p class="small text-muted-ps mb-0">Reviewed ' + esc(fmtDateTime(ep.reviewedAt)) + '</p>'
+                '<p class="small text-muted-ps mb-0">Reviewed ' + esc(fmtDateTime(ep.reviewedAt)) + (lastReviewer(ep) ? ' by ' + esc(lastReviewer(ep)) : '') + '</p>'
               : '<p class="text-muted-ps small mb-0">' + (ep.qcStatus === 'Awaiting review' ? 'Waiting for the audio engineer. Loudness, bitrate and format will be checked against the rules.' : 'Not sent for review yet. Send it when the audio is ready.') + '</p>') +
           '</div></section>' +
         '</div>' +
       '</div>');
+    loadStoredMedia(ep, $('#mediaSlot'));
+  }
+
+  function lastReviewer(ep) {
+    const r = (ep.reviews || [])[(ep.reviews || []).length - 1];
+    return r && r.by ? r.by : '';
   }
 
   function checkItemHTML(c) {
@@ -1106,6 +1593,7 @@
     });
     if (!ok) return;
     if (!commit({ episodes: state.episodes.filter(e => e.episodeId !== id), stats: state.stats.filter(s => s.episodeId !== id) })) return;
+    Media.FileStore.remove(id).catch(() => {});
     toast('Episode deleted.', 'success');
     navigate('#/dashboard');
   }
@@ -1128,7 +1616,7 @@
       pageHead('Review Queue', 'Check loudness, bitrate and format, then mark each episode Passed or Needs fixes.',
         '<span class="chip chip-primary"><i class="bi bi-bullseye" aria-hidden="true"></i>Target ' + R.QUALITY_RULES.targetLufs + ' LUFS ±' + R.QUALITY_RULES.toleranceLufs + '</span>' +
         '<span class="chip chip-primary"><i class="bi bi-speedometer2" aria-hidden="true"></i>≥ ' + R.QUALITY_RULES.minBitrateKbps + ' kbps</span>' +
-        '<span class="chip chip-primary"><i class="bi bi-file-earmark-music" aria-hidden="true"></i>mp3 / m4a</span>') +
+        '<span class="chip chip-primary"><i class="bi bi-file-earmark-music" aria-hidden="true"></i>mp3 / m4a / mp4</span>') +
       '<div class="row g-4">' +
         '<div class="col-md-5 col-xl-4">' +
           '<div class="seg-tabs mb-3" role="tablist" aria-label="Review lists">' +
@@ -1177,7 +1665,7 @@
       '</dl>';
     const historyHTML = reviews.length
       ? '<hr class="my-4"><h3 class="h6 fw-bold">Past checks for this episode</h3><ul class="history">' + reviews.map(rv =>
-          '<li><div class="d-flex flex-wrap gap-2 align-items-center mb-1">' + badge(rv.result) + '<span class="ep-meta">' + esc(fmtDateTime(rv.at)) + '</span></div>' +
+          '<li><div class="d-flex flex-wrap gap-2 align-items-center mb-1">' + badge(rv.result) + '<span class="ep-meta">' + esc(fmtDateTime(rv.at)) + (rv.by ? ' · ' + esc(rv.by) : '') + '</span></div>' +
           '<span class="ep-meta">' + esc(rv.loudnessLufs) + ' LUFS · ' + esc(rv.bitrateKbps) + ' kbps · .' + esc(rv.format || '?') + '</span>' +
           (rv.note ? '<div class="small mt-1">“' + esc(rv.note) + '”</div>' : '') + '</li>').join('') + '</ul>'
       : '';
@@ -1191,8 +1679,15 @@
     }
 
     return '<section class="ps-card" aria-labelledby="rvTitle">' + header.replace('class="card-title text-truncate"', 'class="card-title text-truncate" id="rvTitle"') + '<div class="card-body">' +
-      waveformHTML(ep.episodeId, 80) +
-      '<p class="small text-muted-ps mt-1">Illustrative waveform. Measure the real file in your audio tools and enter the values below.</p>' +
+      waveformHTML(ep.episodeId, 80, ep.peaks) +
+      (ep.fileStored
+        ? '<div class="file-card my-3"><div class="d-flex flex-wrap gap-2 align-items-center justify-content-between"><strong class="small"><i class="bi ' + (ep.fileKind === 'video' ? 'bi-camera-video' : 'bi-file-earmark-music') + ' me-1" aria-hidden="true"></i>Uploaded file</strong>' +
+            fileChipsHTML({ format: fmt, size: ep.fileSizeBytes, duration: ep.durationSec, kind: ep.fileKind, bitrate: R.estimateBitrateKbps(ep.fileSizeBytes, ep.durationSec) }) + '</div>' +
+            '<div id="mediaSlot"></div>' +
+            '<div class="mt-3 d-flex flex-wrap gap-2 align-items-center"><button type="button" class="btn btn-sm btn-primary" id="measureBtn"><i class="bi bi-activity me-1" aria-hidden="true"></i>Measure from file</button>' +
+            '<span class="small text-muted-ps">Fills in loudness' + (ep.fileKind === 'audio' && ep.estBitrateKbps ? ' and bitrate' : '') + ' from the uploaded file.</span></div><div id="measureOut"></div></div>'
+        : '<p class="small text-muted-ps mt-1">Illustrative waveform. No file was uploaded, so measure the audio in your own tools and enter the values below.</p>') +
+      (ep.measuredLufs != null ? '<p class="mb-3"><span class="chip"><i class="bi bi-person" aria-hidden="true"></i>Podcaster pre-check: ' + esc(ep.measuredLufs) + ' LUFS</span></p>' : '') +
       facts +
       (missing ? '<div class="mb-3">' + alertHTML('warning', '<strong>Missing audio details.</strong> This episode has no file name or duration. Mark it Needs fixes and ask the podcaster to add them.') + '</div>' : '') +
       '<form id="reviewForm" novalidate>' +
@@ -1223,7 +1718,7 @@
             '<button type="button" data-chip="Clean master, loudness on target.">Clean master</button>' +
             '<button type="button" data-chip="Re-export at −16 LUFS integrated.">Re-export at −16 LUFS</button>' +
             '<button type="button" data-chip="Raise the bitrate to 128 kbps or higher.">Raise bitrate</button>' +
-            '<button type="button" data-chip="Export as mp3 or m4a.">Export as mp3/m4a</button></div>' +
+            '<button type="button" data-chip="Export as mp3, m4a or mp4.">Export as mp3/m4a/mp4</button></div>' +
         '</div>' +
         '<div class="d-flex flex-wrap gap-2 mt-4">' +
           '<button type="submit" class="btn btn-success" id="btnPassed" data-result="Passed" aria-describedby="passHint"><i class="bi bi-patch-check-fill me-1" aria-hidden="true"></i>Mark Passed</button>' +
@@ -1282,7 +1777,7 @@
       const passed = q.checks.filter(c => c.pass).length;
       const ring = $('#scoreRing');
       ring.style.setProperty('--p', String(passed / 3 * 100));
-      ring.style.setProperty('--ring', q.allPass ? 'var(--ps-success)' : passed ? 'var(--ps-primary)' : '#D1D5DB');
+      ring.style.setProperty('--ring', q.allPass ? 'var(--ps-success)' : passed ? 'var(--ps-primary)' : 'var(--ps-border-strong)');
       $('#scoreText').textContent = passed + '/3';
       $('#scoreSummary').textContent = q.allPass ? 'All checks pass. You can mark this episode Passed.'
         : passed + ' of 3 checks pass. Failed: ' + q.failed.map(c => c.id).join(', ') + '.';
@@ -1294,6 +1789,19 @@
     };
 
     [lufs, rate].forEach(i => i.addEventListener('input', update));
+    let fileBlob = null;
+    loadStoredMedia(ep, $('#mediaSlot'), b => { fileBlob = b; });
+    const mb = $('#measureBtn');
+    if (mb) mb.addEventListener('click', async () => {
+      if (!fileBlob) { $('#measureOut').innerHTML = '<div class="mt-2">' + alertHTML('info', 'The file is still loading, or it is not in this browser. Enter the values from your audio tool instead.') + '</div>'; return; }
+      const res = await runMeasure(fileBlob, ep.durationSec, $('#measureOut'), mb);
+      if (res && isFinite(res.lufs)) {
+        lufs.value = res.lufs.toFixed(1);
+        if (ep.fileKind === 'audio' && ep.estBitrateKbps && !rate.value) rate.value = ep.estBitrateKbps;
+        update();
+        toast('Loudness filled in from the file: ' + res.lufs.toFixed(1) + ' LUFS. Check the values, then record your result.', 'info', 'Measured');
+      }
+    });
     note.addEventListener('input', () => {
       if (noteError && note.value.trim()) { noteError = ''; paint(fieldErrors()); }
     });
@@ -1307,7 +1815,7 @@
       const parts = q.failed.map(c => {
         if (c.id === 'loudness') return c.entered ? 'Loudness is ' + c.value + '; re-export at −16 LUFS (allowed −17 to −15).' : 'Add the loudness measurement.';
         if (c.id === 'bitrate') return c.entered ? 'Bitrate is ' + c.value + '; export at 128 kbps or higher.' : 'Add the bitrate.';
-        return 'File format ' + c.value + ' is not accepted; export as mp3 or m4a.';
+        return 'File format ' + c.value + ' is not accepted; export as mp3, m4a or mp4.';
       });
       note.value = parts.join(' ');
       note.focus();
@@ -1340,7 +1848,7 @@
       const updated = Object.assign({}, ep, {
         loudnessLufs: L, bitrateKbps: B, qcStatus: result, qcNote: txt, reviewedAt: now,
         status: result === 'Passed' ? 'Approved' : 'Draft',
-        reviews: (ep.reviews || []).concat([{ at: now, result, note: txt, loudnessLufs: L, bitrateKbps: B, format: R.getFormat(ep.audioFileName) }])
+        reviews: (ep.reviews || []).concat([{ at: now, result, note: txt, loudnessLufs: L, bitrateKbps: B, format: R.getFormat(ep.audioFileName), by: state.user ? state.user.name : '' }])
       });
       if (!commit({ episodes: replaceEpisode(updated) })) {
         summary.innerHTML = '<div class="mb-3">' + alertHTML('error', '<strong>Data could not be saved.</strong> Your values are still on screen. Try again.') + '</div>';
@@ -1437,7 +1945,7 @@
   function chartBase() {
     if (!window.Chart) return;
     Chart.defaults.font.family = "'Inter', system-ui, sans-serif";
-    Chart.defaults.color = '#4B5563';
+    Chart.defaults.color = chartColors().text;
     Chart.defaults.plugins.tooltip.backgroundColor = '#1F2937';
     Chart.defaults.plugins.tooltip.padding = 10;
     Chart.defaults.plugins.tooltip.cornerRadius = 8;
@@ -1566,14 +2074,14 @@
           type: 'line',
           data: { labels, datasets: [
             { label: 'Plays per day', data: plays, borderColor: '#6D28D9', backgroundColor: areaFill, fill: true, tension: 0.35, pointRadius: 0, pointHoverRadius: 5, pointBackgroundColor: '#6D28D9', borderWidth: 2.5 },
-            { label: '7-day moving average', data: ma, borderColor: '#1F2937', borderDash: [6, 5], borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, fill: false, tension: 0.35 }
+            { label: '7-day moving average', data: ma, borderColor: chartColors().line2, borderDash: [6, 5], borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, fill: false, tension: 0.35 }
           ] },
           options: {
             responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
             plugins: { legend: { position: 'bottom', labels: { usePointStyle: true, boxWidth: 8, padding: 16 } },
               tooltip: { callbacks: { label: c => ' ' + c.dataset.label + ': ' + fmtNum(c.parsed.y) } } },
             scales: { x: { grid: { display: false }, ticks: { maxTicksLimit: 8, maxRotation: 0, autoSkip: true } },
-              y: { beginAtZero: true, grid: { color: '#F3F4F6' }, border: { display: false }, ticks: { precision: 0 } } }
+              y: { beginAtZero: true, grid: { color: chartColors().grid }, border: { display: false }, ticks: { precision: 0 } } }
           }
         });
       } else {
@@ -1584,7 +2092,7 @@
         ch.update(liveTick ? 'none' : undefined);
       }
       const top5 = d.top.slice(0, 5);
-      const tl = top5.map(r => r.episode.title.length > 22 ? r.episode.title.slice(0, 21) + '…' : r.episode.title);
+      const tl = top5.map(r => r.episode.title.length > 17 ? r.episode.title.slice(0, 16).trim() + '…' : r.episode.title);
       if (!state.charts.top) {
         state.charts.top = new Chart($('#topChart'), {
           type: 'bar',
@@ -1592,7 +2100,7 @@
           options: {
             indexAxis: 'y', responsive: true, maintainAspectRatio: false, layout: { padding: { left: 4 } },
             plugins: { legend: { display: false }, tooltip: { callbacks: { title: c => top5[c[0].dataIndex] ? top5[c[0].dataIndex].episode.title : '', label: c => ' ' + fmtNum(c.parsed.x) + ' plays' } } },
-            scales: { x: { beginAtZero: true, grid: { color: '#F3F4F6' }, border: { display: false }, ticks: { precision: 0, maxTicksLimit: 5 } }, y: { grid: { display: false } } },
+            scales: { x: { beginAtZero: true, grid: { color: chartColors().grid }, border: { display: false }, ticks: { precision: 0, maxTicksLimit: 5 } }, y: { grid: { display: false } } },
             onClick: (e, els) => { if (els[0] && top5[els[0].index]) navigate('#/analytics/' + top5[els[0].index].episode.episodeId); }
           }
         });
@@ -1800,12 +2308,12 @@
         type: 'bar',
         data: { labels: days.map(shortDate), datasets: [
           { type: 'bar', label: 'This episode', data: epDaily, backgroundColor: 'rgba(109,40,217,.85)', borderRadius: 4, maxBarThickness: 18, order: 2 },
-          { type: 'line', label: 'Show average per episode', data: showAvgDaily, borderColor: '#1F2937', borderDash: [6, 5], borderWidth: 2, pointRadius: 0, tension: 0.35, order: 1 }
+          { type: 'line', label: 'Show average per episode', data: showAvgDaily, borderColor: chartColors().line2, borderDash: [6, 5], borderWidth: 2, pointRadius: 0, tension: 0.35, order: 1 }
         ] },
         options: {
           responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
           plugins: { legend: { position: 'bottom', labels: { usePointStyle: true, boxWidth: 8, padding: 16 } } },
-          scales: { x: { grid: { display: false }, ticks: { maxTicksLimit: 8, maxRotation: 0 } }, y: { beginAtZero: true, grid: { color: '#F3F4F6' }, border: { display: false }, ticks: { precision: 0 } } }
+          scales: { x: { grid: { display: false }, ticks: { maxTicksLimit: 8, maxRotation: 0 } }, y: { beginAtZero: true, grid: { color: chartColors().grid }, border: { display: false }, ticks: { precision: 0 } } }
         }
       });
     } else $$('.chart-box').forEach(b => b.classList.add('no-chart'));
@@ -1826,7 +2334,7 @@
             '<div class="table-responsive"><table class="table ps-table"><thead><tr><th scope="col">Check</th><th scope="col">Rule</th><th scope="col">Example</th></tr></thead><tbody>' +
               '<tr><td>Loudness</td><td>Within ±' + r.toleranceLufs + ' LUFS of ' + r.targetLufs + ' LUFS (−17 to −15)</td><td>−16.4 passes, −17.2 fails</td></tr>' +
               '<tr><td>Bitrate</td><td>At least ' + r.minBitrateKbps + ' kbps</td><td>128 passes, 96 fails</td></tr>' +
-              '<tr><td>Format</td><td>mp3 or m4a</td><td>.m4a passes, .wav fails</td></tr>' +
+              '<tr><td>Format</td><td>mp3, m4a or mp4</td><td>.mp4 passes, .wav fails</td></tr>' +
             '</tbody></table></div>' +
             '<p class="mb-2">The engineer then records the final result as <strong>Passed</strong> (only when every check passes) or <strong>Needs fixes</strong> (a note is required).</p>' +
             '<p class="mb-0"><strong>Publish rule:</strong> an episode can be published only when its quality check is Passed and all required fields are valid.</p>' +
@@ -1843,14 +2351,15 @@
         '<div class="col-lg-5">' +
           '<section class="ps-card mb-4"><div class="card-header"><h2 class="card-title"><i class="bi bi-exclamation-diamond me-2 text-primary" aria-hidden="true"></i>Demo limits</h2></div><div class="card-body"><ul class="mb-0 small d-grid gap-2">' +
             '<li><strong>All data is sample data.</strong> Shows, episodes and listener numbers are synthetic. They are not real listeners.</li>' +
-            '<li><strong>No audio is hosted, edited or distributed.</strong> Only the file name is stored. There is no RSS feed.</li>' +
-            '<li><strong>Role checks are a client-side demonstration only</strong>, not real security. There are no accounts or server-side login.</li>' +
+            '<li><strong>Uploads stay in this browser.</strong> mp3, m4a and mp4 files (up to 300 MB) are kept in IndexedDB so you can play and measure them. They are never sent to a server, edited or distributed, and there is no RSS feed.</li>' +
+            '<li><strong>Loudness measured in the browser is approximate</strong> (ITU-R BS.1770 gating at 24 kHz, files up to 30 minutes). Bitrate is estimated from file size; for mp4 video, enter the audio bitrate from your export settings.</li>' +
+            '<li><strong>Sign-in and role checks are a client-side demonstration only</strong>, not real security. Accounts live in this browser with salted SHA-256 password hashes; there is no server-side login. Demo accounts: podcaster@demo.studio and engineer@demo.studio, password ' + esc(Store.DEMO_PASSWORD) + '.</li>' +
             '<li><strong>Quality checks use simplified rules</strong> for learning.</li>' +
             '<li><strong>Live listens</strong> on the Analytics screen are simulated and labelled as sample data.</li>' +
           '</ul></div></section>' +
           '<section class="ps-card mb-4"><div class="card-header"><h2 class="card-title"><i class="bi bi-hdd me-2 text-primary" aria-hidden="true"></i>Your data</h2></div><div class="card-body">' +
             '<p class="small">Data is saved in this browser\'s localStorage under these keys:</p>' +
-            '<p class="small">' + Object.values(Store.KEYS).map(k => '<code>' + k + '</code>').join('<br>') + '</p>' +
+            '<p class="small">' + Object.values(Store.KEYS).map(k => '<code>' + k + '</code>').join('<br>') + '<br>Uploaded files: IndexedDB database <code>podcaststudio_media</code></p>' +
             (state.storageOk ? '' : alertHTML('warning', 'Browser storage is not available, so changes will be lost when you close this tab.')) +
             '<div class="d-flex flex-wrap gap-2 mt-3"><button type="button" class="btn btn-outline-primary" data-action="load-sample"><i class="bi bi-arrow-repeat me-1" aria-hidden="true"></i>Reload sample data</button>' +
             '<button type="button" class="btn btn-outline-danger" data-action="clear-data"><i class="bi bi-trash me-1" aria-hidden="true"></i>Clear episodes &amp; stats</button></div>' +
@@ -1877,6 +2386,7 @@
     }
     const data = Store.buildSampleData(today());
     if (!commit({ shows: data.shows, episodes: data.episodes, stats: data.stats })) return;
+    Media.FileStore.clear().catch(() => {});
     toast('Sample data loaded. Every screen now has data.', 'success', 'Sample data');
     refresh();
   }
@@ -1884,6 +2394,7 @@
     const ok = await confirmDialog({ title: 'Clear episodes and stats?', body: '<p class="mb-0">All episodes, quality checks and listener numbers will be removed from this browser. Shows are kept so you can create new episodes. You can reload sample data at any time.</p>', confirmText: 'Clear data', variant: 'danger' });
     if (!ok) return;
     if (!commit({ episodes: [], stats: [] })) return;
+    Media.FileStore.clear().catch(() => {});
     toast('Episodes and listener numbers cleared.', 'success');
     navigate('#/dashboard');
   }
@@ -2005,6 +2516,12 @@
     window.addEventListener('hashchange', () => router());
     $$('input[name="role"]').forEach(i => i.addEventListener('change', () => setRole(i.value)));
     $('#tourClose').addEventListener('click', endTour);
+    $('#themeToggle').addEventListener('click', toggleTheme);
+    if (window.matchMedia) {
+      const mq = matchMedia('(prefers-color-scheme: dark)');
+      const onSys = () => { if ((state.prefs.theme || 'system') === 'system') applyTheme(); };
+      if (mq.addEventListener) mq.addEventListener('change', onSys); else if (mq.addListener) mq.addListener(onSys);
+    }
 
     document.addEventListener('click', e => {
       const el = e.target.closest('[data-action]');
@@ -2013,6 +2530,8 @@
       const id = el.dataset.id;
       switch (a) {
         case 'start-tour': startTour(); break;
+        case 'toggle-theme': toggleTheme(); break;
+        case 'sign-out': signOut(); break;
         case 'tour-go': tourGo(); break;
         case 'shortcuts': bootstrap.Modal.getOrCreateInstance($('#shortcutsModal')).show(); break;
         case 'export-episodes': exportEpisodes(); break;
@@ -2041,7 +2560,7 @@
         if (e.key === 'Escape' && t.id === 'search') t.blur();
         return;
       }
-      if ($('.modal.show')) return;
+      if ($('.modal.show') || !state.user) return;
       const k = e.key.toLowerCase();
       if (gPending) {
         gPending = false;
@@ -2099,7 +2618,15 @@
       $('#globalBanner').innerHTML = '<div class="px-3 px-md-4 pt-3">' + alertHTML('warning', '<strong>Browser storage is not available.</strong> You can explore with sample data, but changes will be lost when you close this tab.') + '</div>';
     }
 
+    // Accounts + session (client-side demo sign-in)
+    state.users = state.storageOk ? Store.loadUsers() : Store.DEMO_USERS.map(u => Store.makeUser(u, Store.DEMO_PASSWORD));
+    const sess = Store.readSession();
+    state.user = sess ? state.users.find(u => u.userId === sess.userId) || null : null;
+    if (sess && !state.user) Store.clearSession();
+
     bindGlobal();
+    applyTheme();
+    syncUserUI();
     syncRoleUI();
 
     if (!location.hash) {
